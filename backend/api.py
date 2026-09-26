@@ -35,6 +35,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     created_by text NOT NULL,
     created_at timestamptz NOT NULL
 );
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS appeal_count integer NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS appeals (
+    id serial PRIMARY KEY,
+    job_id integer NOT NULL REFERENCES jobs (id),
+    appeal_no integer NOT NULL,
+    reason text NOT NULL,
+    requested_by text NOT NULL,
+    created_at timestamptz NOT NULL
+);
 """
 
 
@@ -47,6 +56,10 @@ class JobIn(BaseModel):
     sheet: str
     cyan_mm: float
     magenta_mm: float
+
+
+class AppealIn(BaseModel):
+    reason: str
 
 
 def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(security)) -> dict:
@@ -64,6 +77,12 @@ def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(secu
 def require_writer(user: dict = Depends(current_user)) -> dict:
     if user["role"] != "writer":
         raise HTTPException(status_code=403, detail="仅印刷员可送复核")
+    return user
+
+
+def require_reader(user: dict = Depends(current_user)) -> dict:
+    if user["role"] != "reader":
+        raise HTTPException(status_code=403, detail="印刷员不能申请复议，仅只读质检可点复议")
     return user
 
 
@@ -106,7 +125,7 @@ def login(body: LoginIn):
 def list_jobs(_user: dict = Depends(current_user)):
     with connect() as conn:
         return conn.execute(
-            "SELECT id, sheet, cyan_mm, magenta_mm, status, verdict, reason, created_by FROM jobs ORDER BY id DESC"
+            "SELECT id, sheet, cyan_mm, magenta_mm, status, verdict, reason, appeal_count, created_by FROM jobs ORDER BY id DESC"
         ).fetchall()
 
 
@@ -121,3 +140,37 @@ def enqueue(body: JobIn, user: dict = Depends(require_writer)):
         ).fetchone()
         conn.commit()
     return row
+
+
+@app.post("/api/jobs/{job_id}/appeal")
+def appeal(job_id: int, body: AppealIn, user: dict = Depends(require_reader)):
+    reason = body.reason.strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="请填写复议理由")
+    with connect() as conn:
+        row = conn.execute(
+            """UPDATE jobs
+               SET status = 'pending', verdict = '', reason = '', appeal_count = appeal_count + 1
+               WHERE id = %s AND status = 'done'
+               RETURNING id, status, appeal_count""",
+            (job_id,),
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=409, detail="仅已出结论的任务可申请复议")
+        conn.execute(
+            """INSERT INTO appeals (job_id, appeal_no, reason, requested_by, created_at)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (job_id, row["appeal_count"], reason, user["username"], datetime.now(timezone.utc)),
+        )
+        conn.commit()
+    return row
+
+
+@app.get("/api/appeals")
+def list_appeals(_user: dict = Depends(current_user)):
+    with connect() as conn:
+        return conn.execute(
+            """SELECT a.id, a.job_id, j.sheet, a.appeal_no, a.reason, a.requested_by, a.created_at
+               FROM appeals a JOIN jobs j ON j.id = a.job_id
+               ORDER BY a.id DESC"""
+        ).fetchall()
