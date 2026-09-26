@@ -31,8 +31,20 @@ def ensure():
                 status text NOT NULL,
                 verdict text NOT NULL DEFAULT '',
                 reason text NOT NULL DEFAULT '',
+                appeal_count integer NOT NULL DEFAULT 0,
                 created_by text NOT NULL,
                 created_at timestamptz NOT NULL
+            )"""
+        )
+        conn.execute("ALTER TABLE jobs ADD COLUMN IF NOT EXISTS appeal_count integer NOT NULL DEFAULT 0")
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS appeals (
+                id serial PRIMARY KEY,
+                job_id integer NOT NULL REFERENCES jobs(id),
+                round integer NOT NULL,
+                reason text NOT NULL,
+                appealed_by text NOT NULL,
+                appealed_at timestamptz NOT NULL
             )"""
         )
         conn.commit()
